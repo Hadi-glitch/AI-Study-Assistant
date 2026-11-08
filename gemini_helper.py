@@ -4,6 +4,7 @@
 """
 import os
 import json
+import time
 from dotenv import load_dotenv
 from google import genai
 
@@ -32,14 +33,25 @@ def _get_client():
     return _client
 
 
-def _ask(prompt):
-    try:
-        response = _get_client().models.generate_content(model=MODEL, contents=prompt)
-        return response.text or ""
-    except GeminiError:
-        raise
-    except Exception as e:
-        raise GeminiError(f"Gemini request failed: {e}")
+def _ask(prompt, retries=4):
+    """Call Gemini, retrying with a growing delay when the server is busy (503) or rate-limited (429)."""
+    delay = 2
+    for attempt in range(retries + 1):
+        try:
+            response = _get_client().models.generate_content(model=MODEL, contents=prompt)
+            return response.text or ""
+        except GeminiError:
+            raise
+        except Exception as e:
+            msg = str(e)
+            busy = any(code in msg for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"))
+            if busy and attempt < retries:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            if busy:
+                raise GeminiError("Gemini is busy or you hit the free-tier limit. Wait a minute and try again.")
+            raise GeminiError(f"Gemini request failed: {e}")
 
 
 def _trim(notes):

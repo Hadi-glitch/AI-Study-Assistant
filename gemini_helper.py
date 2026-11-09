@@ -5,12 +5,22 @@ Test this file on its own before touching the UI:
 """
 import os
 import json
+import sys
 import time
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+if getattr(sys, "frozen", False):
+    _APP_DIR = Path(sys.executable).resolve().parent
+else:
+    _APP_DIR = Path(__file__).resolve().parent
+for _env_name in (".env", "api.env"):
+    _env_path = _APP_DIR / _env_name
+    if _env_path.is_file():
+        load_dotenv(dotenv_path=_env_path)
+        break
 
-# Models: change in .env if a name is retired (GEMINI_MODEL / GROQ_MODEL).
+# Models: change in .env or api.env if a name is retired (GEMINI_MODEL / GROQ_MODEL).
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "")  # leave empty to auto-pick from what your key can use
 # Preferred Groq models, best first. The first one your account has is used.
@@ -23,15 +33,11 @@ GROQ_PREFERRED = [
 ]
 MODEL = GEMINI_MODEL  # kept for backwards compatibility
 
-# Which provider to try first. Set PROVIDER_ORDER=gemini,groq in .env to change.
+# Which provider to try first. Set PROVIDER_ORDER=gemini,groq in .env or api.env to change.
 PROVIDER_ORDER = [p.strip() for p in os.getenv("PROVIDER_ORDER", "groq,gemini").split(",") if p.strip()]
 
 # Free tiers have limits, so trim very long notes.
 MAX_CHARS = 30000
-
-# The UI shows plain text, so ask the AI not to use Markdown/LaTeX.
-PLAIN = ("Use plain text only: no Markdown (no ** or #), no LaTeX. "
-         "Use simple dashes for bullets and write formulas like CO2 or 6CO2 + 6H2O -> C6H12O6 + 6O2.\n\n")
 
 # Errors worth retrying (server busy / rate limit / timeout).
 _RETRYABLE = ("500", "502", "503", "504", "429", "UNAVAILABLE", "DEADLINE_EXCEEDED",
@@ -142,7 +148,7 @@ def _parse_json(text):
 
 
 def summarize(notes):
-    return _ask(PLAIN + f"Summarize these notes in clear bullet points for studying:\n\n{_trim(notes)}")
+    return _ask(f"Summarize these notes in clear bullet points for studying:\n\n{_trim(notes)}")
 
 
 def make_flashcards(notes, n=5):
@@ -185,7 +191,7 @@ def chat(notes, question, history=None):
     for who, msg in (history or [])[-6:]:
         past += f"{who}: {msg}\n"
     return _ask(
-        PLAIN + "Answer using ONLY these notes. If the answer isn't there, say so.\n\n"
+        "Answer using ONLY these notes. If the answer isn't there, say so.\n\n"
         f"NOTES:\n{_trim(notes)}\n\n"
         f"CONVERSATION SO FAR:\n{past}\n"
         f"QUESTION: {question}"

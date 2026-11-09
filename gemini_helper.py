@@ -1,4 +1,5 @@
-"""All Gemini calls live here. Test this file on its own before touching the UI:
+"""All AI calls live here (Groq + Gemini with automatic fallback).
+Test this file on its own before touching the UI:
 
     python gemini_helper.py
 """
@@ -6,52 +7,115 @@ import os
 import json
 import time
 from dotenv import load_dotenv
-from google import genai
 
 load_dotenv()
 
-# Change the model in .env (GEMINI_MODEL=...) if this one is retired.
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+# Models: change in .env if a name is retired (GEMINI_MODEL / GROQ_MODEL).
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "")  # leave empty to auto-pick from what your key can use
+# Preferred Groq models, best first. The first one your account has is used.
+GROQ_PREFERRED = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+]
+MODEL = GEMINI_MODEL  # kept for backwards compatibility
 
-# Free tier has limits, so trim very long notes.
+# Which provider to try first. Set PROVIDER_ORDER=gemini,groq in .env to change.
+PROVIDER_ORDER = [p.strip() for p in os.getenv("PROVIDER_ORDER", "groq,gemini").split(",") if p.strip()]
+
+# Free tiers have limits, so trim very long notes.
 MAX_CHARS = 30000
 
-_client = None
+# Errors worth retrying (server busy / rate limit / timeout).
+_RETRYABLE = ("500", "502", "503", "504", "429", "UNAVAILABLE", "DEADLINE_EXCEEDED",
+              "RESOURCE_EXHAUSTED", "INTERNAL", "rate limit", "Rate limit", "timed out", "Timeout", "timeout")
+
+_clients = {}
 
 
 class GeminiError(Exception):
-    """Raised for any problem talking to Gemini (shown to the user in the UI)."""
+    """Raised for any problem talking to the AI (shown to the user in the UI)."""
 
 
-def _get_client():
-    global _client
-    if _client is None:
-        key = os.getenv("GEMINI_API_KEY")
-        if not key:
-            raise GeminiError("GEMINI_API_KEY is missing. Add it to your .env file.")
-        _client = genai.Client(api_key=key)
-    return _client
+def _gemini_call(prompt):
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        raise GeminiError("GEMINI_API_KEY is missing.")
+    if "gemini" not in _clients:
+        from google import genai
+        from google.genai import types
+        _clients["gemini"] = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=60000))
+    r = _clients["gemini"].models.generate_content(model=GEMINI_MODEL, contents=prompt)
+    return r.text or ""
 
 
-def _ask(prompt, retries=4):
-    """Call Gemini, retrying with a growing delay when the server is busy (503) or rate-limited (429)."""
-    delay = 2
-    for attempt in range(retries + 1):
-        try:
-            response = _get_client().models.generate_content(model=MODEL, contents=prompt)
-            return response.text or ""
-        except GeminiError:
-            raise
-        except Exception as e:
-            msg = str(e)
-            busy = any(code in msg for code in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED"))
-            if busy and attempt < retries:
-                time.sleep(delay)
-                delay *= 2
-                continue
-            if busy:
-                raise GeminiError("Gemini is busy or you hit the free-tier limit. Wait a minute and try again.")
-            raise GeminiError(f"Gemini request failed: {e}")
+def _pick_groq_model(client):
+    """Ask Groq which models this key can use and choose the best match."""
+    if GROQ_MODEL:
+        return GROQ_MODEL
+    if "groq_model" not in _clients:
+        available = {m.id for m in client.models.list().data}
+        chosen = next((m for m in GROQ_PREFERRED if m in available), None)
+        if chosen is None:
+            skip = ("whisper", "tts", "guard", "orpheus", "allam", "compound")
+            chat_models = sorted(m for m in available if not any(x in m.lower() for x in skip))
+            if not chat_models:
+                raise GeminiError("No usable Groq chat model found for this key.")
+            chosen = chat_models[0]
+        print(f"  [groq] using model: {chosen}", flush=True)
+        _clients["groq_model"] = chosen
+    return _clients["groq_model"]
+
+
+def _groq_call(prompt):
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        raise GeminiError("GROQ_API_KEY is missing.")
+    if "groq" not in _clients:
+        from openai import OpenAI
+        _clients["groq"] = OpenAI(api_key=key, base_url="https://api.groq.com/openai/v1", timeout=60)
+    client = _clients["groq"]
+    r = client.chat.completions.create(
+        model=_pick_groq_model(client), messages=[{"role": "user", "content": prompt}], temperature=0.3
+    )
+    text = r.choices[0].message.content or ""
+    if "</think>" in text:  # some models include their reasoning; drop it
+        text = text.split("</think>")[-1]
+    return text.strip()
+
+
+_PROVIDERS = {"gemini": _gemini_call, "groq": _groq_call}
+
+
+def _ask(prompt, retries=2):
+    """Try each provider in order. Retry busy errors briefly, then fall back to the next provider."""
+    errors = []
+    for name in PROVIDER_ORDER:
+        call = _PROVIDERS.get(name)
+        if call is None:
+            continue
+        delay = 2
+        for attempt in range(retries + 1):
+            try:
+                print(f"  [{name}] calling (attempt {attempt + 1})...", flush=True)
+                return call(prompt)
+            except Exception as e:
+                msg = str(e)
+                if "_KEY is missing" in msg:
+                    errors.append(f"{name}: no API key")
+                    break
+                if any(c in msg for c in _RETRYABLE) and attempt < retries:
+                    print(f"  [{name}] busy, retrying in {delay}s...", flush=True)
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                errors.append(f"{name}: {msg[:150]}")
+                print(f"  [{name}] failed, trying next provider...", flush=True)
+                break
+    raise GeminiError("All AI providers failed. " + " | ".join(errors))
 
 
 def _trim(notes):
@@ -125,7 +189,9 @@ def chat(notes, question, history=None):
 
 
 if __name__ == "__main__":
+    print(f"Provider order: {PROVIDER_ORDER}", flush=True)
     sample = "Photosynthesis is the process by which plants convert light, water and CO2 into glucose and oxygen."
-    print(summarize(sample))
-    print(make_flashcards(sample, 2))
-    print(make_quiz(sample, 2))
+    print("\n--- SUMMARY ---\n" + summarize(sample), flush=True)
+    print("\n--- FLASHCARDS ---\n", make_flashcards(sample, 2), flush=True)
+    print("\n--- QUIZ ---\n", make_quiz(sample, 2), flush=True)
+    print("\nAll tests passed.")

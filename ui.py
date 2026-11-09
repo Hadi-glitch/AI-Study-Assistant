@@ -87,15 +87,26 @@ class StudyApp(ctk.CTk):
         self.notes_box.insert("1.0", "")
 
     def upload(self):
-        path = filedialog.askopenfilename(filetypes=[("Notes", "*.pdf *.txt"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Choose your notes (PDF or TXT)",
+            filetypes=[("PDF or text files", ("*.pdf", "*.txt")), ("All files", "*.*")],
+        )
         if not path:
+            self.status.configure(text="No file selected")
             return
+        name = path.replace("\\", "/").split("/")[-1]
 
         def done(text):
+            text = text.strip()
+            if not text:
+                messagebox.showwarning("Empty file", f"No text could be read from {name}.")
+                return
             self.notes_box.delete("1.0", "end")
             self.notes_box.insert("1.0", text)
+            self.status.configure(text=f"Loaded {name} ({len(text):,} characters)")
 
-        self.run_async(lambda: read_file(path), done, "Reading file...")
+        self.run_async(lambda: read_file(path), done, f"Reading {name}...")
 
     # ---------- Summary ----------
     def _build_summary(self):

@@ -29,6 +29,10 @@ PROVIDER_ORDER = [p.strip() for p in os.getenv("PROVIDER_ORDER", "groq,gemini").
 # Free tiers have limits, so trim very long notes.
 MAX_CHARS = 30000
 
+# The UI shows plain text, so ask the AI not to use Markdown/LaTeX.
+PLAIN = ("Use plain text only: no Markdown (no ** or #), no LaTeX. "
+         "Use simple dashes for bullets and write formulas like CO2 or 6CO2 + 6H2O -> C6H12O6 + 6O2.\n\n")
+
 # Errors worth retrying (server busy / rate limit / timeout).
 _RETRYABLE = ("500", "502", "503", "504", "429", "UNAVAILABLE", "DEADLINE_EXCEEDED",
               "RESOURCE_EXHAUSTED", "INTERNAL", "rate limit", "Rate limit", "timed out", "Timeout", "timeout")
@@ -138,7 +142,7 @@ def _parse_json(text):
 
 
 def summarize(notes):
-    return _ask(f"Summarize these notes in clear bullet points for studying:\n\n{_trim(notes)}")
+    return _ask(PLAIN + f"Summarize these notes in clear bullet points for studying:\n\n{_trim(notes)}")
 
 
 def make_flashcards(notes, n=5):
@@ -181,7 +185,7 @@ def chat(notes, question, history=None):
     for who, msg in (history or [])[-6:]:
         past += f"{who}: {msg}\n"
     return _ask(
-        "Answer using ONLY these notes. If the answer isn't there, say so.\n\n"
+        PLAIN + "Answer using ONLY these notes. If the answer isn't there, say so.\n\n"
         f"NOTES:\n{_trim(notes)}\n\n"
         f"CONVERSATION SO FAR:\n{past}\n"
         f"QUESTION: {question}"

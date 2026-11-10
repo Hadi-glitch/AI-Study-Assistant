@@ -368,6 +368,8 @@ class OptionRow(ctk.CTkFrame):
         self.text = ctk.CTkLabel(self, text="", anchor="w", justify="left", text_color=TEXT,
                                  font=cf(14), wraplength=620)
         self.text.pack(side="left", fill="x", expand=True, padx=(0, 16), pady=11)
+        # Update wraplength when the row resizes
+        self.bind("<Configure>", self._on_resize)
         for w in (self, self.badge, self.text):
             w.bind("<Button-1>", self._click)
             w.bind("<Enter>", self._enter)
@@ -376,6 +378,18 @@ class OptionRow(ctk.CTkFrame):
     def _click(self, _event=None):
         if not self.locked:
             self.command()
+
+    def _on_resize(self, event):
+        # Reserve space for badge (34) + padding (14+14+16) = ~78px
+        new_wrap = max(200, event.width - 100)
+        try:
+            self.text._text_label.configure(wraplength=new_wrap)
+        except AttributeError:
+            try:
+                s = self.text._get_widget_scaling()
+            except Exception:
+                s = 1.0
+            self.text.configure(wraplength=int(new_wrap / s))
 
     def _enter(self, _event=None):
         if not self.locked:
@@ -732,13 +746,13 @@ class StudyApp(ctk.CTk):
         self.card_side = ctk.CTkLabel(self.card, text="", font=cf(11, "bold"), text_color=GOLD)
         self.card_side.pack(pady=(28, 0))
         self.card_text = ctk.CTkLabel(self.card, text="Generate a set to begin.", font=cf(24, serif=True),
-                                      text_color=MUTED, wraplength=700, justify="center")
-        self.card_text.pack(expand=True, padx=44)
+                                      text_color=MUTED, justify="center")
+        self.card_text.pack(expand=True, fill="x", padx=44)
         self.card_hint = ctk.CTkLabel(self.card, text="", font=cf(11), text_color=MUTED)
         self.card_hint.pack(pady=(0, 24))
         for w in (self.card, self.card_side, self.card_text, self.card_hint):
             w.bind("<Button-1>", lambda e: self.flip_card())
-        self.card.bind("<Configure>", lambda e: self.card_text.configure(wraplength=max(260, e.width - 140)))
+        self.card.bind("<Configure>", self._on_card_resize)
 
         prog = ctk.CTkFrame(page, fg_color="transparent")
         prog.pack(fill="x", pady=(0, 12))
@@ -755,6 +769,27 @@ class StudyApp(ctk.CTk):
         self.flip_btn.pack(side="left", padx=6)
         self._button(nav, "Next  \u2192", lambda: self.move_card(1), kind="ghost", width=130).pack(side="left", padx=6)
 
+        # Mastery rating buttons (visible after answer is revealed)
+        self.mastery_frame = ctk.CTkFrame(page, fg_color="transparent")
+        self.mastery_frame.pack(pady=(10, 0))
+        self.btn_dont_know = ctk.CTkButton(self.mastery_frame, text="\u2715  Still learning",
+                                            command=lambda: self.mark_card("learning"),
+                                            fg_color="#2c171c", hover_color="#3d1f27",
+                                            text_color=RED, border_width=1, border_color=RED,
+                                            font=cf(12, "bold"), corner_radius=10, height=36, width=150)
+        self.btn_dont_know.pack(side="left", padx=8)
+        self.btn_know = ctk.CTkButton(self.mastery_frame, text="\u2713  Know it",
+                                       command=lambda: self.mark_card("know"),
+                                       fg_color="#14281f", hover_color="#1c3a2c",
+                                       text_color=GREEN, border_width=1, border_color=GREEN,
+                                       font=cf(12, "bold"), corner_radius=10, height=36, width=150)
+        self.btn_know.pack(side="left", padx=8)
+        self.mastery_frame.pack_forget()  # hidden until answer is shown
+
+        # Mastery stats line
+        self.mastery_stats = ctk.CTkLabel(page, text="", font=cf(11), text_color=MUTED)
+        self.mastery_stats.pack(pady=(6, 0))
+
     def do_cards(self):
         notes = self.get_notes()
         if not notes:
@@ -763,14 +798,44 @@ class StudyApp(ctk.CTk):
         self.run_async(lambda: ai.make_flashcards(notes, n), self.load_cards, "Making flashcards\u2026")
 
     def load_cards(self, cards):
-        self.cards = [{"question": plain(c["question"]), "answer": plain(c["answer"])} for c in cards]
+        self.cards = [{"question": plain(c["question"]), "answer": plain(c["answer"]), "mastery": None}
+                      for c in cards]
         self.card_i = 0
         self.show_card()
 
+    def _set_card_wraplength(self, px):
+        """Set wraplength directly on the internal tk.Label to avoid CTk's DPI double-scaling."""
+        self._set_wraplength(self.card_text, px)
+
+    @staticmethod
+    def _set_wraplength(label, px):
+        """Set wraplength on a CTkLabel, bypassing CTk's DPI scaling which double-scales pixel values."""
+        try:
+            label._text_label.configure(wraplength=px)
+        except AttributeError:
+            try:
+                s = label._get_widget_scaling()
+            except Exception:
+                s = 1.0
+            label.configure(wraplength=int(px / s))
+
+    def _on_card_resize(self, event):
+        wrap_w = max(260, event.width - 140)
+        self._set_card_wraplength(wrap_w)
+
     def _draw_card(self, side, text, border, hint, color):
+        # Dynamically pick a font size that suits the text length AND the card width
+        card_w = self.card.winfo_width()
+        if card_w < 10:  # widget not yet mapped
+            card_w = 700
+        wrap_w = max(260, card_w - 140)
         size = 26 if len(text) < 90 else 20 if len(text) < 220 else 16
+        # Shrink further on narrow windows so text always wraps comfortably
+        if wrap_w < 400 and size > 18:
+            size = 18
         self.card_side.configure(text=side)
         self.card_text.configure(text=text, text_color=color, font=cf(size, serif=True))
+        self._set_card_wraplength(wrap_w)
         self.card_hint.configure(text=hint)
         self.card.configure(border_color=border)
 
@@ -784,6 +849,8 @@ class StudyApp(ctk.CTk):
         self.card_count.configure(text=f"{self.card_i + 1} / {total}")
         self.card_bar.set((self.card_i + 1) / total)
         self.flip_btn.configure(text="Reveal answer")
+        self.mastery_frame.pack_forget()
+        self._update_mastery_stats()
 
     def flip_card(self):
         if not self.cards:
@@ -795,6 +862,36 @@ class StudyApp(ctk.CTk):
         c = self.cards[self.card_i]
         self._draw_card("ANSWER", c["answer"], GOLD, "Click the card to return to the question", GOLD_SOFT)
         self.flip_btn.configure(text="Show question")
+        # Show mastery buttons so the user can rate their recall
+        self.mastery_frame.pack(after=self.flip_btn.master, pady=(10, 0))
+
+    def mark_card(self, status):
+        """Mark the current card as 'know' or 'learning' and advance."""
+        if not self.cards:
+            return
+        self.cards[self.card_i]["mastery"] = status
+        self._update_mastery_stats()
+        # Auto-advance to next card
+        if self.card_i < len(self.cards) - 1:
+            self.move_card(1)
+        else:
+            self.mastery_frame.pack_forget()
+
+    def _update_mastery_stats(self):
+        if not self.cards:
+            self.mastery_stats.configure(text="")
+            return
+        know = sum(1 for c in self.cards if c.get("mastery") == "know")
+        learn = sum(1 for c in self.cards if c.get("mastery") == "learning")
+        unrated = len(self.cards) - know - learn
+        parts = []
+        if know:
+            parts.append(f"\u2713 {know} known")
+        if learn:
+            parts.append(f"\u2715 {learn} still learning")
+        if unrated and (know or learn):
+            parts.append(f"{unrated} unrated")
+        self.mastery_stats.configure(text="  \u00b7  ".join(parts))
 
     def move_card(self, step):
         if self.cards:
@@ -833,6 +930,8 @@ class StudyApp(ctk.CTk):
         self.q_text = ctk.CTkLabel(self.q_card, text="", font=cf(21, serif=True), text_color=TEXT,
                                    wraplength=680, justify="left", anchor="w")
         self.q_text.pack(fill="x", padx=28, pady=26)
+        self.q_card.bind("<Configure>", lambda e: self._set_wraplength(
+            self.q_text, max(260, e.width - 80)))
         self.opts = [OptionRow(body, "ABCD"[i], lambda i=i: self.pick(i)) for i in range(4)]
         self.q_explain_frame = ctk.CTkFrame(body, fg_color=SURFACE, corner_radius=14, border_width=1, border_color=BORDER)
         self.q_explain_title = ctk.CTkLabel(self.q_explain_frame, text="", font=cf(14, "bold"), anchor="w")
@@ -840,6 +939,8 @@ class StudyApp(ctk.CTk):
         self.q_explain = ctk.CTkLabel(self.q_explain_frame, text="", font=cf(13), text_color=MUTED,
                                       wraplength=640, justify="left", anchor="w")
         self.q_explain.pack(fill="x", padx=20, pady=(0, 14))
+        self.q_explain_frame.bind("<Configure>", lambda e: self._set_wraplength(
+            self.q_explain, max(260, e.width - 60)))
         self.q_next = self._button(body, "Next question", self.next_question, width=170)
 
         self.q_result = ctk.CTkFrame(body, fg_color=SURFACE, corner_radius=22, border_width=1, border_color=BORDER)
@@ -861,10 +962,10 @@ class StudyApp(ctk.CTk):
 
     def _on_quiz_resize(self, event):
         wrap = max(260, event.width - 190)
-        self.q_text.configure(wraplength=wrap)
-        self.q_explain.configure(wraplength=wrap)
+        self._set_wraplength(self.q_text, wrap)
+        self._set_wraplength(self.q_explain, wrap)
         for row in self.opts:
-            row.text.configure(wraplength=wrap)
+            self._set_wraplength(row.text, wrap)
 
     def _quiz_stage(self, stage):
         for w in (self.quiz_empty, self.q_meta, self.q_bar, self.q_card, *self.opts,
@@ -906,7 +1007,7 @@ class StudyApp(ctk.CTk):
         self.answered = False
         self._quiz_stage("question")
         self._update_meta()
-        self.q_bar.set(self.quiz_i / len(self.quiz))
+        self.q_bar.set((self.quiz_i + 1) / len(self.quiz))
         self.q_text.configure(text=plain(q["question"]))
         for row, option in zip(self.opts, q["options"]):
             row.reset(plain(option))
@@ -1032,7 +1133,10 @@ class StudyApp(ctk.CTk):
         ranges = tw.tag_ranges("thinking")
         if ranges:
             tw.configure(state="normal")
-            tw.delete(ranges[0], ranges[-1])
+            # Delete all ranges in reverse so indices stay valid
+            pairs = list(zip(ranges[0::2], ranges[1::2]))
+            for start, end in reversed(pairs):
+                tw.delete(start, end)
             tw.configure(state="disabled")
 
     def send_chat(self, text=None):
